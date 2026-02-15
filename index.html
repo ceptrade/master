@@ -75,6 +75,8 @@
   .pill-yes{color:var(--green)}.pill-no{color:var(--text3)}
   .field-edit{width:100%;flex:1;text-align:right;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:border .2s}
   .field-edit:focus{border-color:var(--accent)}
+  .field-link{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);flex-shrink:0;text-decoration:none}
+  .field-link:active{transform:scale(0.9)}
   .detail-actions{margin-top:32px;display:flex;flex-direction:column;gap:10px}
   .action-btn{width:100%;padding:14px;border-radius:12px;font-family:inherit;font-size:14px;font-weight:500;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;gap:8px}
   .action-btn:active{transform:scale(0.98)}
@@ -114,6 +116,14 @@
   .list.grid-2 .card::before,.list.grid-3 .card::before{width:3px}
   .list.grid-2 .empty,.list.grid-3 .empty{grid-column:1/-1}
   .icon-btn.active-view{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .icon-btn.syncing svg{animation:spin 1s linear infinite}
+  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  .sync-bar{padding:6px 16px;font-size:11px;color:var(--text3);display:flex;justify-content:space-between;align-items:center}
+  .sync-bar .sync-status{display:flex;align-items:center;gap:5px}
+  .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
+  .sync-dot.stale{background:var(--amber)}
+  .sync-dot.error{background:var(--red)}
+  .sync-bar a{color:var(--accent);text-decoration:none;font-weight:500;font-size:11px}
   ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
 </style>
 </head>
@@ -122,6 +132,7 @@
   <div class="header-top">
     <div><h1>Properties</h1><span class="count" id="countLabel"></span></div>
     <div style="display:flex;gap:8px">
+      <button class="icon-btn" id="syncBtn" title="Sync from Google Sheets"><svg id="syncIcon" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 4V10H7"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg></button>
       <button class="icon-btn" id="viewToggle" title="Toggle view"><svg id="viewIcon" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="10" y="3" width="5" height="5" rx="1"/><rect x="3" y="10" width="5" height="5" rx="1"/><rect x="10" y="10" width="5" height="5" rx="1"/></svg></button>
       <button class="icon-btn" id="exportBtn" title="Export"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 15h12M9 3v9M5 8l4 4 4-4"/></svg></button>
     </div>
@@ -140,12 +151,12 @@
   <button class="filter-chip fc-current" data-filter="current">Current</button>
   <button class="filter-chip fc-past" data-filter="past">Past</button>
 </div>
+<div class="sync-bar" id="syncBar"><span class="sync-status"><span class="sync-dot stale" id="syncDot"></span><span id="syncLabel">Not synced yet</span></span><a href="#" id="syncSetup">Setup</a></div>
 <div class="list" id="propertyList"></div>
 <button class="fab" id="addBtn" title="Add property"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
 <div class="detail-overlay" id="detailView">
   <div class="detail-header">
     <button class="back-btn" id="backBtn"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 4l-8 8 8 8"/></svg> Back</button>
-    <button class="edit-btn edit" id="editToggle">Edit</button>
   </div>
   <div class="detail-body" id="detailBody"></div>
 </div>
@@ -186,9 +197,20 @@ const FIELDS=[
 ];
 const SECS={info:'Property Info',location:'Location',details:'Details',access:'Access Codes',wifi:'Wi-Fi',amenities:'Amenities',links:'Links'};
 
-let props=[],curFilter='all',query='',editId=null,editing=false,viewMode='list';
+let props=[],curFilter='all',query='',editId=null,viewMode='list';
 
-function init(){ load(); render(); bind(); }
+// ── GOOGLE SHEETS SYNC ──
+const SYNC_URL_KEY='corporateluxe_sync_url';
+function getSyncUrl(){ return localStorage.getItem(SYNC_URL_KEY)||''; }
+function setSyncUrl(url){ localStorage.setItem(SYNC_URL_KEY,url); }
+
+function init(){ load(); render(); bind(); autoSync(); }
+
+function autoSync(){
+  const url=getSyncUrl();
+  if(!url) return;
+  syncFromSheets();
+}
 
 function load(){
   try {
@@ -199,6 +221,75 @@ function load(){
 }
 
 function save(){ localStorage.setItem(DB,JSON.stringify(props)); }
+
+function syncFromSheets(){
+  const url=getSyncUrl();
+  if(!url){ toast('No sync URL set — tap Setup'); return; }
+  const btn=document.getElementById('syncBtn');
+  btn.classList.add('syncing');
+  document.getElementById('syncLabel').textContent='Syncing...';
+
+  fetch(url)
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(data=>{
+      if(!Array.isArray(data)){ throw new Error('Invalid data'); }
+      // Replace local data entirely with Google Sheets data
+      props=data;
+      // Ensure all have status
+      props.forEach(p=>{ if(!p.status) p.status='current'; });
+      save();
+      render();
+      // Update sync UI
+      const now=new Date();
+      const timeStr=now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      document.getElementById('syncLabel').textContent='Synced '+timeStr;
+      document.getElementById('syncDot').className='sync-dot';
+      localStorage.setItem('corporateluxe_last_sync',now.toISOString());
+      toast('Synced — '+props.length+' properties');
+    })
+    .catch(err=>{
+      console.error('Sync error:',err);
+      document.getElementById('syncLabel').textContent='Sync failed';
+      document.getElementById('syncDot').className='sync-dot error';
+      toast('Sync failed — check URL');
+    })
+    .finally(()=>{
+      btn.classList.remove('syncing');
+    });
+}
+
+function updateSyncBar(){
+  const url=getSyncUrl();
+  const setup=document.getElementById('syncSetup');
+  if(url){
+    setup.textContent='Change';
+    const last=localStorage.getItem('corporateluxe_last_sync');
+    if(last){
+      const d=new Date(last);
+      document.getElementById('syncLabel').textContent='Last sync: '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      document.getElementById('syncDot').className='sync-dot';
+    }
+  } else {
+    setup.textContent='Setup';
+    document.getElementById('syncLabel').textContent='Not synced yet';
+    document.getElementById('syncDot').className='sync-dot stale';
+  }
+}
+
+function promptSyncUrl(){
+  const current=getSyncUrl();
+  const url=prompt('Paste your Google Apps Script URL here:'+(current?'\n\nCurrent: '+current:''),current||'');
+  if(url===null) return; // cancelled
+  if(url.trim()){
+    setSyncUrl(url.trim());
+    updateSyncBar();
+    syncFromSheets();
+  } else {
+    setSyncUrl('');
+    updateSyncBar();
+    toast('Sync URL removed');
+  }
+}
 
 function esc(s){ const d=document.createElement('div'); d.textContent=String(s||''); return d.innerHTML; }
 function escA(s){ return String(s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
@@ -263,16 +354,25 @@ function mkCard(p,dim){
 
 function openDetail(id){
   const p=props.find(x=>x.id===id); if(!p) return;
-  editId=id; editing=false;
+  editId=id;
   renderDetail(p);
   document.getElementById('detailView').classList.add('open');
-  document.getElementById('editToggle').textContent='Edit';
-  document.getElementById('editToggle').className='edit-btn edit';
 }
 
 function closeDetail(){
+  // Auto-save on close
+  autoSave();
   document.getElementById('detailView').classList.remove('open');
-  editId=null; editing=false;
+  editId=null;
+}
+
+function autoSave(){
+  const p=props.find(x=>x.id===editId); if(!p) return;
+  let changed=false;
+  document.querySelectorAll('.field-edit').forEach(i=>{
+    if(String(p[i.dataset.key]||'')!==i.value){ p[i.dataset.key]=i.value; changed=true; }
+  });
+  if(changed){ save(); render(); }
 }
 
 function renderDetail(p){
@@ -291,48 +391,37 @@ function renderDetail(p){
       h+='<div class="section"><div class="section-label">'+SECS[f.section]+'</div>';
     }
     const val=String(p[f.key]||'');
-    if(editing){
-      h+='<div class="field"><div class="field-label">'+f.label+'</div>'
-        +'<input class="field-edit" data-key="'+f.key+'" value="'+escA(val)+'"></div>';
-    } else {
-      let vhtml='';
-      if(f.isLink && val){
-        const url=val.startsWith('http')?val:'https://'+val;
-        vhtml='<a href="'+escA(url)+'" target="_blank" rel="noopener">Open &#8599;</a>';
-      } else if(val.toLowerCase()==='yes'){
-        vhtml='<span class="pill-yes">Yes &#10003;</span>';
-      } else if(val.toLowerCase()==='no'||val.toLowerCase()==='no!'){
-        vhtml='<span class="pill-no">No</span>';
-      } else {
-        vhtml=esc(val)||'<span style="color:var(--text3)">&mdash;</span>';
-      }
-      const cbtn=(f.copyable&&val)?'<button class="copy-btn" data-copy="'+escA(val)+'" title="Copy"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M5 9H3.5A1.5 1.5 0 012 7.5v-5A1.5 1.5 0 013.5 1h5A1.5 1.5 0 0110 2.5V5"/></svg></button>':'';
-      h+='<div class="field"><div class="field-label">'+f.label+'</div><div class="field-value">'+vhtml+cbtn+'</div></div>';
-    }
+    const cbtn=(f.copyable&&val)?'<button class="copy-btn" data-copy="'+escA(val)+'" title="Copy"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M5 9H3.5A1.5 1.5 0 012 7.5v-5A1.5 1.5 0 013.5 1h5A1.5 1.5 0 0110 2.5V5"/></svg></button>':'';
+    const link=(f.isLink&&val)?'<a class="field-link" href="'+(val.startsWith('http')?escA(val):'https://'+escA(val))+'" target="_blank" rel="noopener"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3H3v8h8V7"/><path d="M7 7L13 1M9 1h4v4"/></svg></a>':'';
+    h+='<div class="field"><div class="field-label">'+f.label+'</div>'
+      +'<div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end">'
+      +'<input class="field-edit" data-key="'+f.key+'" value="'+escA(val)+'">'
+      +link+cbtn+'</div></div>';
   });
   h+='</div>';
 
-  if(!editing){
-    h+='<div class="detail-actions">';
-    if(isCur){
-      h+='<button class="action-btn archive" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="14" height="4" rx="1"/><path d="M2 7h14v7a2 2 0 01-2 2H4a2 2 0 01-2-2V7zM7 11h4"/></svg> Move to Past Properties</button>';
-    } else {
-      h+='<button class="action-btn restore" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 100-12l-3 3"/></svg> Restore to Current Properties</button>';
-    }
-    h+='<button class="action-btn delete" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h12M5 6V4a1 1 0 011-1h6a1 1 0 011 1v2M8 9v5M10 9v5"/><path d="M4 6l1 10a1 1 0 001 1h6a1 1 0 001-1l1-10"/></svg> Delete Permanently</button>';
-    h+='</div>';
+  h+='<div class="detail-actions">';
+  if(isCur){
+    h+='<button class="action-btn archive" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="14" height="4" rx="1"/><path d="M2 7h14v7a2 2 0 01-2 2H4a2 2 0 01-2-2V7zM7 11h4"/></svg> Move to Past Properties</button>';
+  } else {
+    h+='<button class="action-btn restore" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 100-12l-3 3"/></svg> Restore to Current Properties</button>';
   }
+  h+='<button class="action-btn delete" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h12M5 6V4a1 1 0 011-1h6a1 1 0 011 1v2M8 9v5M10 9v5"/><path d="M4 6l1 10a1 1 0 001 1h6a1 1 0 001-1l1-10"/></svg> Delete Permanently</button>';
+  h+='</div>';
 
   body.innerHTML=h;
-}
 
-function saveEdits(){
-  const p=props.find(x=>x.id===editId); if(!p) return;
-  document.querySelectorAll('.field-edit').forEach(i=>{ p[i.dataset.key]=i.value; });
-  save(); editing=false; renderDetail(p); render();
-  document.getElementById('editToggle').textContent='Edit';
-  document.getElementById('editToggle').className='edit-btn edit';
-  toast('Changes saved');
+  // Auto-save on every input change
+  body.querySelectorAll('.field-edit').forEach(input=>{
+    input.addEventListener('input',()=>{
+      const p=props.find(x=>x.id===editId); if(!p) return;
+      p[input.dataset.key]=input.value;
+      save();
+      // Update copy button next to this field if exists
+      const cb=input.parentElement.querySelector('.copy-btn');
+      if(cb) cb.dataset.copy=input.value;
+    });
+  });
 }
 
 function archiveProp(id){
@@ -353,9 +442,6 @@ function addProp(){
   FIELDS.forEach(f=>np[f.key]='');
   np.internalName='New Property'; np.bedrooms=1; np.bathrooms=1;
   props.unshift(np); save(); render(); openDetail(np.id);
-  editing=true; renderDetail(np);
-  document.getElementById('editToggle').textContent='Save';
-  document.getElementById('editToggle').className='edit-btn save';
   toast('New property added');
 }
 
@@ -419,13 +505,10 @@ function bind(){
 
   document.getElementById('backBtn').addEventListener('click',closeDetail);
 
-  document.getElementById('editToggle').addEventListener('click',()=>{
-    if(editing){ saveEdits(); }
-    else { editing=true; const p=props.find(x=>x.id===editId); if(p) renderDetail(p);
-      document.getElementById('editToggle').textContent='Save';
-      document.getElementById('editToggle').className='edit-btn save';
-    }
-  });
+  // Sync bindings
+  document.getElementById('syncBtn').addEventListener('click',syncFromSheets);
+  document.getElementById('syncSetup').addEventListener('click',function(e){ e.preventDefault(); promptSyncUrl(); });
+  updateSyncBar();
 
   document.getElementById('detailBody').addEventListener('click',e=>{
     const cb=e.target.closest('.copy-btn');
