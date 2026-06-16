@@ -159,6 +159,7 @@
 <div class="detail-overlay" id="detailView">
   <div class="detail-header">
     <button class="back-btn" id="backBtn"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 4l-8 8 8 8"/></svg> Back</button>
+    <button class="edit-btn edit" id="editToggle">Edit</button>
   </div>
   <div class="detail-body" id="detailBody"></div>
 </div>
@@ -185,6 +186,7 @@ const FIELDS=[
   {key:'bedrooms',label:'Bedrooms',section:'details',copyable:false},
   {key:'bathrooms',label:'Bathrooms',section:'details',copyable:false},
   {key:'lockboxCode',label:'Lockbox Code',section:'access',copyable:true},
+  {key:'extraCode',label:'Extra Code',section:'access',copyable:true},
   {key:'emergencyLockboxCode',label:'Emergency Code',section:'access',copyable:true},
   {key:'wifiName',label:'Wi-Fi SSID',section:'wifi',copyable:true},
   {key:'wifiPassword',label:'Wi-Fi Password',section:'wifi',copyable:true},
@@ -199,7 +201,7 @@ const FIELDS=[
 ];
 const SECS={info:'Property Info',location:'Location',details:'Details',access:'Access Codes',wifi:'Wi-Fi',amenities:'Amenities',links:'Links'};
 
-let props=[],curFilter='all',query='',editId=null,viewMode='list';
+let props=[],curFilter='all',query='',editId=null,editing=false,viewMode='list';
 
 // ── GOOGLE SHEETS SYNC ──
 const SYNC_URL_KEY='corporateluxe_sync_url';
@@ -411,35 +413,48 @@ function mkCard(p,dim){
 
 function openDetail(id){
   const p=props.find(x=>x.id===id); if(!p) return;
-  editId=id;
+  editId=id; editing=false;
   renderDetail(p);
   document.getElementById('detailView').classList.add('open');
+  document.getElementById('editToggle').textContent='Edit';
+  document.getElementById('editToggle').className='edit-btn edit';
 }
 
 function closeDetail(){
-  // Auto-save on close
-  autoSave();
+  if(editing) saveEdits();
   document.getElementById('detailView').classList.remove('open');
-  editId=null;
+  editId=null; editing=false;
 }
 
-function autoSave(){
+function saveEdits(){
   const p=props.find(x=>x.id===editId); if(!p) return;
-  let changed=false;
   document.querySelectorAll('.field-edit').forEach(i=>{
-    if(String(p[i.dataset.key]||'')!==i.value){ p[i.dataset.key]=i.value; changed=true; }
+    const oldVal=String(p[i.dataset.key]||'');
+    const newVal=i.value;
+    if(oldVal!==newVal){
+      p[i.dataset.key]=newVal;
+      pushField(p.id, i.dataset.key, newVal);
+    }
   });
-  if(changed){ save(); render(); }
+  save(); render();
+  editing=false;
+  renderDetail(p);
+  document.getElementById('editToggle').textContent='Edit';
+  document.getElementById('editToggle').className='edit-btn edit';
+  toast('Changes saved');
 }
 
 function renderDetail(p){
   const body=document.getElementById('detailBody');
   const isCur=p.status==='current';
+
+  // Title area
   let h='<div class="detail-title">'+esc(p.internalName)+'</div>'
     +'<div class="detail-subtitle">'+esc(p.name)+'</div>'
     +'<div class="status-badge '+(isCur?'current':'past')+'">'
-    +(isCur?'&#10003; Current Property':'&#9201; Past Property')+'</div>';
+    +(isCur?'&#10003; Current':'&#9201; Past')+'</div>';
 
+  // Fields
   let curSec='';
   FIELDS.forEach(f=>{
     if(f.section!==curSec){
@@ -448,39 +463,43 @@ function renderDetail(p){
       h+='<div class="section"><div class="section-label">'+SECS[f.section]+'</div>';
     }
     const val=String(p[f.key]||'');
-    const cbtn=(f.copyable&&val)?'<button class="copy-btn" data-copy="'+escA(val)+'" title="Copy"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M5 9H3.5A1.5 1.5 0 012 7.5v-5A1.5 1.5 0 013.5 1h5A1.5 1.5 0 0110 2.5V5"/></svg></button>':'';
-    const link=(f.isLink&&val)?'<a class="field-link" href="'+(val.startsWith('http')?escA(val):'https://'+escA(val))+'" target="_blank" rel="noopener"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3H3v8h8V7"/><path d="M7 7L13 1M9 1h4v4"/></svg></a>':'';
-    h+='<div class="field"><div class="field-label">'+f.label+'</div>'
-      +'<div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end">'
-      +'<input class="field-edit" data-key="'+f.key+'" value="'+escA(val)+'">'
-      +link+cbtn+'</div></div>';
+
+    if(editing){
+      // ── EDIT MODE ──
+      h+='<div class="field"><div class="field-label">'+f.label+'</div>'
+        +'<input class="field-edit" data-key="'+f.key+'" value="'+escA(val)+'"></div>';
+    } else {
+      // ── READ MODE ──
+      let vhtml='';
+      if(f.isLink && val){
+        const url=val.startsWith('http')?val:'https://'+val;
+        vhtml='<a href="'+escA(url)+'" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:13px">Open &#8599;</a>';
+      } else if(val.toLowerCase()==='yes'){
+        vhtml='<span class="pill-yes">Yes &#10003;</span>';
+      } else if(val.toLowerCase()==='no'||val.toLowerCase()==='no!'){
+        vhtml='<span class="pill-no">No</span>';
+      } else {
+        vhtml=esc(val)||'<span style="color:var(--text3)">&mdash;</span>';
+      }
+      const cbtn=(f.copyable&&val)?'<button class="copy-btn" data-copy="'+escA(val)+'" title="Copy"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M5 9H3.5A1.5 1.5 0 012 7.5v-5A1.5 1.5 0 013.5 1h5A1.5 1.5 0 0110 2.5V5"/></svg></button>':'';
+      h+='<div class="field"><div class="field-label">'+f.label+'</div><div class="field-value">'+vhtml+cbtn+'</div></div>';
+    }
   });
   h+='</div>';
 
-  h+='<div class="detail-actions">';
-  if(isCur){
-    h+='<button class="action-btn archive" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="14" height="4" rx="1"/><path d="M2 7h14v7a2 2 0 01-2 2H4a2 2 0 01-2-2V7zM7 11h4"/></svg> Move to Past Properties</button>';
-  } else {
-    h+='<button class="action-btn restore" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 100-12l-3 3"/></svg> Restore to Current Properties</button>';
+  // Action buttons (only in read mode)
+  if(!editing){
+    h+='<div class="detail-actions">';
+    if(isCur){
+      h+='<button class="action-btn archive" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="14" height="4" rx="1"/><path d="M2 7h14v7a2 2 0 01-2 2H4a2 2 0 01-2-2V7zM7 11h4"/></svg> Move to Past Properties</button>';
+    } else {
+      h+='<button class="action-btn restore" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 100-12l-3 3"/></svg> Restore to Current Properties</button>';
+    }
+    h+='<button class="action-btn delete" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h12M5 6V4a1 1 0 011-1h6a1 1 0 011 1v2M8 9v5M10 9v5"/><path d="M4 6l1 10a1 1 0 001 1h6a1 1 0 001-1l1-10"/></svg> Delete Permanently</button>';
+    h+='</div>';
   }
-  h+='<button class="action-btn delete" data-id="'+p.id+'"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h12M5 6V4a1 1 0 011-1h6a1 1 0 011 1v2M8 9v5M10 9v5"/><path d="M4 6l1 10a1 1 0 001 1h6a1 1 0 001-1l1-10"/></svg> Delete Permanently</button>';
-  h+='</div>';
 
   body.innerHTML=h;
-
-  // Auto-save on every input change
-  body.querySelectorAll('.field-edit').forEach(input=>{
-    input.addEventListener('input',()=>{
-      const p=props.find(x=>x.id===editId); if(!p) return;
-      p[input.dataset.key]=input.value;
-      save();
-      // Push this single field change to Google Sheets
-      pushField(p.id, input.dataset.key, input.value);
-      // Update copy button next to this field if exists
-      const cb=input.parentElement.querySelector('.copy-btn');
-      if(cb) cb.dataset.copy=input.value;
-    });
-  });
 }
 
 function archiveProp(id){
@@ -502,7 +521,12 @@ function addProp(){
   const np={id:mx+1,status:'current'};
   FIELDS.forEach(f=>np[f.key]='');
   np.internalName='New Property'; np.bedrooms=1; np.bathrooms=1;
-  props.unshift(np); save(); render(); openDetail(np.id);
+  props.unshift(np); save(); render(); 
+  editId=np.id; editing=true;
+  renderDetail(np);
+  document.getElementById('detailView').classList.add('open');
+  document.getElementById('editToggle').textContent='Save';
+  document.getElementById('editToggle').className='edit-btn save';
   pushNewProperty(np);
   toast('New property added');
 }
@@ -567,6 +591,17 @@ function bind(){
   });
 
   document.getElementById('backBtn').addEventListener('click',closeDetail);
+
+  document.getElementById('editToggle').addEventListener('click',()=>{
+    if(editing){ saveEdits(); }
+    else {
+      editing=true;
+      const p=props.find(x=>x.id===editId);
+      if(p) renderDetail(p);
+      document.getElementById('editToggle').textContent='Save';
+      document.getElementById('editToggle').className='edit-btn save';
+    }
+  });
 
   // Sync bindings
   document.getElementById('syncBtn').addEventListener('click',syncFromSheets);
